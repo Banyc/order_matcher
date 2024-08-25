@@ -40,7 +40,7 @@ impl Direction {
 
 #[derive(Debug, Clone)]
 pub struct Filled<K> {
-    pub name: K,
+    pub key: K,
     pub quantity: NonZeroUsize,
 }
 
@@ -94,17 +94,17 @@ impl<K: OrderKey> AutoMatcher<K> {
             };
             let queue = best_matchable_queue.get_mut();
             loop {
-                let Some((quantity, completion)) = queue.match_(remaining_quantity) else {
+                let Some((filled, completion)) = queue.match_(remaining_quantity) else {
                     break;
                 };
                 match completion {
                     OrderCompletion::Completed => {
-                        self.orders.remove(&quantity.name);
+                        self.orders.remove(&filled.key);
                     }
                     OrderCompletion::Open => (),
                 }
-                let remaining = remaining_quantity.get() - quantity.quantity.get();
-                on_each_filled(quantity);
+                let remaining = remaining_quantity.get() - filled.quantity.get();
+                on_each_filled(filled);
                 let Some(remaining) = NonZeroUsize::new(remaining) else {
                     return;
                 };
@@ -211,7 +211,7 @@ impl<K: OrderKey> PriceQueue<K> {
             let (_, neural, front_quantity) =
                 neutralize_quantity(quantity.get(), front.quantity.get());
             let filled = Filled {
-                name: front.key.clone(),
+                key: front.key.clone(),
                 quantity: NonZeroUsize::new(neural).unwrap(),
             };
             let completion = match NonZeroUsize::new(front_quantity) {

@@ -112,6 +112,10 @@ impl<K: OrderKey> AutoMatcher<K> {
             }
             self.reused_queues.push(best_matchable_queue.remove());
         }
+        let order = LimitOrder {
+            quantity: remaining_quantity,
+            ..order
+        };
         self.insert_order(order);
     }
 

@@ -93,10 +93,7 @@ impl<K: OrderKey> AutoMatcher<K> {
                 break;
             };
             let queue = best_matchable_queue.get_mut();
-            loop {
-                let Some((filled, completion)) = queue.match_(remaining_quantity) else {
-                    break;
-                };
+            while let Some((filled, completion)) = queue.match_(remaining_quantity) {
                 match completion {
                     OrderCompletion::Completed => {
                         self.orders.remove(&filled.key);

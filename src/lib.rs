@@ -106,10 +106,14 @@ impl<K: OrderKey> AutoMatcher<K> {
                 let remaining = remaining_quantity.get() - filled.quantity.get();
                 on_each_filled(filled);
                 let Some(remaining) = NonZeroUsize::new(remaining) else {
+                    if queue.is_empty() {
+                        self.reused_queues.push(best_matchable_queue.remove());
+                    }
                     return;
                 };
                 remaining_quantity = remaining;
             }
+            assert!(queue.is_empty());
             self.reused_queues.push(best_matchable_queue.remove());
         }
         let order = LimitOrder {
@@ -195,15 +199,19 @@ impl<K: OrderKey> PriceQueue<K> {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.num_unfilled_orders == 0
+    }
+
     pub fn match_(&mut self, quantity: NonZeroUsize) -> Option<(Filled<K>, OrderCompletion)> {
-        if self.num_unfilled_orders == 0 {
+        if self.is_empty() {
             return None;
         }
         let front = loop {
             let front = self.orders.front_mut().unwrap();
             let Some(front) = front else {
                 self.orders.pop_front();
-                assert_ne!(self.num_unfilled_orders, 0);
+                assert!(!self.is_empty());
                 continue;
             };
             break front;

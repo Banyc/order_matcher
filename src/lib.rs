@@ -187,16 +187,10 @@ impl<K: OrderKey> PriceQueue<K> {
             self.num_unfilled_orders -= 1;
             break;
         }
-        loop {
-            if self.orders.front().is_some() {
-                break;
-            }
+        while self.orders.front().is_none() {
             self.orders.pop_front();
         }
-        loop {
-            if self.orders.back().is_some() {
-                break;
-            }
+        while self.orders.back().is_none() {
             self.orders.pop_back();
         }
     }
@@ -205,31 +199,31 @@ impl<K: OrderKey> PriceQueue<K> {
         if self.num_unfilled_orders == 0 {
             return None;
         }
-        loop {
+        let front = loop {
             let front = self.orders.front_mut().unwrap();
             let Some(front) = front else {
                 self.orders.pop_front();
                 assert_ne!(self.num_unfilled_orders, 0);
                 continue;
             };
-            let (_, neural, front_quantity) =
-                neutralize_quantity(quantity.get(), front.quantity.get());
-            let filled = Filled {
-                key: front.key.clone(),
-                quantity: NonZeroUsize::new(neural).unwrap(),
-            };
-            let completion = match NonZeroUsize::new(front_quantity) {
-                Some(front_quantity) => {
-                    front.quantity = front_quantity;
-                    OrderCompletion::Open
-                }
-                None => {
-                    self.orders.pop_front();
-                    OrderCompletion::Completed
-                }
-            };
-            return Some((filled, completion));
-        }
+            break front;
+        };
+        let (_, neural, front_quantity) = neutralize_quantity(quantity.get(), front.quantity.get());
+        let filled = Filled {
+            key: front.key.clone(),
+            quantity: NonZeroUsize::new(neural).unwrap(),
+        };
+        let completion = match NonZeroUsize::new(front_quantity) {
+            Some(front_quantity) => {
+                front.quantity = front_quantity;
+                OrderCompletion::Open
+            }
+            None => {
+                self.orders.pop_front();
+                OrderCompletion::Completed
+            }
+        };
+        Some((filled, completion))
     }
 }
 

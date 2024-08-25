@@ -60,8 +60,8 @@ impl<K> AutoMatcher<K> {
     }
 }
 impl<K: OrderKey> AutoMatcher<K> {
-    pub fn cancel_order(&mut self, key: K) {
-        let Some((price, direction)) = self.orders.remove(&key) else {
+    pub fn cancel_order(&mut self, key: &K) {
+        let Some((price, direction)) = self.orders.remove(key) else {
             return;
         };
         let queues = self.both_queues.get_mut(direction);
@@ -157,7 +157,7 @@ impl<T: Default> BothDirectionData<T> {
 
 #[derive(Debug, Clone)]
 struct PriceQueue<K> {
-    orders: VecDeque<OpenOrder<K>>,
+    orders: VecDeque<Option<OpenOrder<K>>>,
     num_unfilled_orders: usize,
 }
 impl<K> PriceQueue<K> {
@@ -170,24 +170,30 @@ impl<K> PriceQueue<K> {
 }
 impl<K: OrderKey> PriceQueue<K> {
     pub fn push(&mut self, key: K, quantity: NonZeroUsize) {
-        self.orders.push_back(OpenOrder::new(key, quantity));
+        self.orders.push_back(Some(OpenOrder::new(key, quantity)));
         self.num_unfilled_orders += 1;
     }
 
-    pub fn cancel(&mut self, key: K) {
+    pub fn cancel(&mut self, key: &K) {
         for order in self.orders.iter_mut() {
-            if order.is_cancelled {
+            if order.as_ref().map(|o| &o.key) != Some(key) {
                 continue;
             }
-            if order.key != key {
-                continue;
-            }
-            order.is_cancelled = true;
+            *order = None;
             self.num_unfilled_orders -= 1;
             break;
         }
-        if self.num_unfilled_orders == 0 {
-            self.orders.clear();
+        loop {
+            if self.orders.front().is_some() {
+                break;
+            }
+            self.orders.pop_front();
+        }
+        loop {
+            if self.orders.back().is_some() {
+                break;
+            }
+            self.orders.pop_back();
         }
     }
 
@@ -197,11 +203,11 @@ impl<K: OrderKey> PriceQueue<K> {
         }
         loop {
             let front = self.orders.front_mut().unwrap();
-            if front.is_cancelled {
+            let Some(front) = front else {
                 self.orders.pop_front();
                 assert_ne!(self.num_unfilled_orders, 0);
                 continue;
-            }
+            };
             let (_, neural, front_quantity) =
                 neutralize_quantity(quantity.get(), front.quantity.get());
             let filled = Filled {
@@ -231,17 +237,12 @@ enum OrderCompletion {
 
 #[derive(Debug, Clone)]
 struct OpenOrder<K> {
-    key: K,
-    quantity: NonZeroUsize,
-    is_cancelled: bool,
+    pub key: K,
+    pub quantity: NonZeroUsize,
 }
 impl<K> OpenOrder<K> {
     pub fn new(key: K, quantity: NonZeroUsize) -> Self {
-        Self {
-            key,
-            quantity,
-            is_cancelled: false,
-        }
+        Self { key, quantity }
     }
 }
 

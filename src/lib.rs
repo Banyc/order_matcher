@@ -38,7 +38,7 @@ impl Direction {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Filled<K> {
     pub key: K,
     pub quantity: NonZeroUsize,
@@ -225,6 +225,7 @@ impl<K: OrderKey> PriceQueue<K> {
             }
             None => {
                 self.orders.pop_front();
+                self.num_unfilled_orders -= 1;
                 OrderCompletion::Completed
             }
         };
@@ -252,4 +253,136 @@ impl<K> OpenOrder<K> {
 fn neutralize_quantity(a: usize, b: usize) -> (usize, usize, usize) {
     let min = a.min(b);
     (a - min, min, b - min)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+    struct MyOrderKey(usize);
+    impl OrderKey for MyOrderKey {}
+
+    #[test]
+    fn test_place_cancel() {
+        let mut matcher = AutoMatcher::new();
+        let mut filled_buf = vec![];
+        {
+            let mut on_each_filled = |filled| {
+                filled_buf.push(filled);
+            };
+            matcher.place_order(
+                LimitOrder {
+                    key: MyOrderKey(0),
+                    direction: Direction::Buy,
+                    price: UnitPrice::new(NonZeroUsize::new(2).unwrap()),
+                    quantity: NonZeroUsize::new(2).unwrap(),
+                },
+                &mut on_each_filled,
+            );
+            assert!(filled_buf.is_empty());
+        }
+        {
+            let mut on_each_filled = |filled| {
+                filled_buf.push(filled);
+            };
+            matcher.place_order(
+                LimitOrder {
+                    key: MyOrderKey(1),
+                    direction: Direction::Buy,
+                    price: UnitPrice::new(NonZeroUsize::new(2).unwrap()),
+                    quantity: NonZeroUsize::new(2).unwrap(),
+                },
+                &mut on_each_filled,
+            );
+            assert!(filled_buf.is_empty());
+        }
+        {
+            let mut on_each_filled = |filled| {
+                filled_buf.push(filled);
+            };
+            matcher.place_order(
+                LimitOrder {
+                    key: MyOrderKey(2),
+                    direction: Direction::Buy,
+                    price: UnitPrice::new(NonZeroUsize::new(2).unwrap()),
+                    quantity: NonZeroUsize::new(2).unwrap(),
+                },
+                &mut on_each_filled,
+            );
+            assert!(filled_buf.is_empty());
+            matcher.cancel_order(&MyOrderKey(2));
+        }
+        {
+            let mut on_each_filled = |filled| {
+                filled_buf.push(filled);
+            };
+            matcher.place_order(
+                LimitOrder {
+                    key: MyOrderKey(3),
+                    direction: Direction::Buy,
+                    price: UnitPrice::new(NonZeroUsize::new(1).unwrap()),
+                    quantity: NonZeroUsize::new(2).unwrap(),
+                },
+                &mut on_each_filled,
+            );
+            assert!(filled_buf.is_empty());
+        }
+        {
+            let mut on_each_filled = |filled| {
+                filled_buf.push(filled);
+            };
+            matcher.place_order(
+                LimitOrder {
+                    key: MyOrderKey(4),
+                    direction: Direction::Sell,
+                    price: UnitPrice::new(NonZeroUsize::new(1).unwrap()),
+                    quantity: NonZeroUsize::new(3).unwrap(),
+                },
+                &mut on_each_filled,
+            );
+            assert_eq!(
+                filled_buf,
+                [
+                    Filled {
+                        key: MyOrderKey(0),
+                        quantity: NonZeroUsize::new(2).unwrap()
+                    },
+                    Filled {
+                        key: MyOrderKey(1),
+                        quantity: NonZeroUsize::new(1).unwrap()
+                    }
+                ]
+            );
+            filled_buf.clear();
+        }
+        {
+            let mut on_each_filled = |filled| {
+                filled_buf.push(filled);
+            };
+            matcher.place_order(
+                LimitOrder {
+                    key: MyOrderKey(5),
+                    direction: Direction::Sell,
+                    price: UnitPrice::new(NonZeroUsize::new(1).unwrap()),
+                    quantity: NonZeroUsize::new(3).unwrap(),
+                },
+                &mut on_each_filled,
+            );
+            assert_eq!(
+                filled_buf,
+                [
+                    Filled {
+                        key: MyOrderKey(1),
+                        quantity: NonZeroUsize::new(1).unwrap()
+                    },
+                    Filled {
+                        key: MyOrderKey(3),
+                        quantity: NonZeroUsize::new(2).unwrap()
+                    }
+                ]
+            );
+            filled_buf.clear();
+        }
+    }
 }

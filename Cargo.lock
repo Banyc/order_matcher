@@ -5,3 +5,11 @@ version = 3
 [[package]]
 name = "auto_matching"
 version = "0.1.0"
+dependencies = [
+ "primitive",
+]
+
+[[package]]
+name = "primitive"
+version = "0.1.0"
+source = "git+https://github.com/Banyc/primitive.git?tag=v0.0.2#456451401d8613dbca71aafdbc6ceb14f3749a6d"

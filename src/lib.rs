@@ -1,7 +1,9 @@
 use std::{
-    collections::{BTreeMap, HashMap, VecDeque},
+    collections::{BTreeMap, HashMap},
     num::NonZeroUsize,
 };
+
+use primitive::indexed_queue::{IndexedQueue, QueueIndex};
 
 pub trait OrderKey: Clone + Eq + core::hash::Hash {}
 
@@ -47,7 +49,7 @@ pub struct Filled<K> {
 #[derive(Debug, Clone)]
 pub struct AutoMatcher<K> {
     both_queues: BothDirectionData<BTreeMap<UnitPrice, PriceQueue<K>>>,
-    orders: HashMap<K, (UnitPrice, Direction)>,
+    orders: HashMap<K, (UnitPrice, Direction, QueueIndex)>,
     reused_queues: Vec<PriceQueue<K>>,
 }
 impl<K> AutoMatcher<K> {
@@ -61,12 +63,12 @@ impl<K> AutoMatcher<K> {
 }
 impl<K: OrderKey> AutoMatcher<K> {
     pub fn cancel_order(&mut self, key: &K) {
-        let Some((price, direction)) = self.orders.remove(key) else {
+        let Some((price, direction, index)) = self.orders.remove(key) else {
             return;
         };
         let queues = self.both_queues.get_mut(direction);
         let queue = queues.get_mut(&price).unwrap();
-        queue.cancel(key);
+        queue.cancel(index);
     }
 
     /// # Panic
@@ -121,8 +123,6 @@ impl<K: OrderKey> AutoMatcher<K> {
     }
 
     fn insert_order(&mut self, order: LimitOrder<K>) {
-        self.orders
-            .insert(order.key.clone(), (order.price, order.direction));
         let queues = self.both_queues.get_mut(order.direction);
         let queue = queues.entry(order.price).or_insert_with(|| {
             if let Some(queue) = self.reused_queues.pop() {
@@ -130,7 +130,10 @@ impl<K: OrderKey> AutoMatcher<K> {
             }
             PriceQueue::new()
         });
-        queue.push(order.key, order.quantity);
+        let key = order.key.clone();
+        let index = queue.push(order.key, order.quantity);
+        self.orders
+            .insert(key, (order.price, order.direction, index));
     }
 }
 impl<K> Default for AutoMatcher<K> {
@@ -162,57 +165,30 @@ impl<T: Default> BothDirectionData<T> {
 
 #[derive(Debug, Clone)]
 struct PriceQueue<K> {
-    orders: VecDeque<Option<OpenOrder<K>>>,
-    num_unfilled_orders: usize,
+    orders: IndexedQueue<OpenOrder<K>>,
 }
 impl<K> PriceQueue<K> {
     pub fn new() -> Self {
         Self {
-            orders: VecDeque::new(),
-            num_unfilled_orders: 0,
+            orders: IndexedQueue::new(),
         }
     }
 }
 impl<K: OrderKey> PriceQueue<K> {
-    pub fn push(&mut self, key: K, quantity: NonZeroUsize) {
-        self.orders.push_back(Some(OpenOrder::new(key, quantity)));
-        self.num_unfilled_orders += 1;
+    pub fn push(&mut self, key: K, quantity: NonZeroUsize) -> QueueIndex {
+        self.orders.enqueue(OpenOrder::new(key, quantity))
     }
 
-    pub fn cancel(&mut self, key: &K) {
-        for order in self.orders.iter_mut() {
-            if order.as_ref().map(|o| &o.key) != Some(key) {
-                continue;
-            }
-            *order = None;
-            self.num_unfilled_orders -= 1;
-            break;
-        }
-        while self.orders.front().is_none() {
-            self.orders.pop_front();
-        }
-        while self.orders.back().is_none() {
-            self.orders.pop_back();
-        }
+    pub fn cancel(&mut self, index: QueueIndex) {
+        self.orders.remove(index);
     }
 
     pub fn is_empty(&self) -> bool {
-        self.num_unfilled_orders == 0
+        self.orders.is_empty()
     }
 
     pub fn match_(&mut self, quantity: NonZeroUsize) -> Option<(Filled<K>, OrderCompletion)> {
-        if self.is_empty() {
-            return None;
-        }
-        let front = loop {
-            let front = self.orders.front_mut().unwrap();
-            let Some(front) = front else {
-                self.orders.pop_front();
-                assert!(!self.is_empty());
-                continue;
-            };
-            break front;
-        };
+        let front = self.orders.front_mut()?;
         let (_, neural, front_quantity) = neutralize_quantity(quantity.get(), front.quantity.get());
         let filled = Filled {
             key: front.key.clone(),
@@ -224,8 +200,7 @@ impl<K: OrderKey> PriceQueue<K> {
                 OrderCompletion::Open
             }
             None => {
-                self.orders.pop_front();
-                self.num_unfilled_orders -= 1;
+                self.orders.dequeue();
                 OrderCompletion::Completed
             }
         };

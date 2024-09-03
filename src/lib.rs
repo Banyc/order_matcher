@@ -165,7 +165,7 @@ impl<T: Default> BothDirectionData<T> {
 
 #[derive(Debug, Clone)]
 struct PriceQueue<K> {
-    orders: IndexedQueue<OpenOrder<K>>,
+    orders: IndexedQueue<UnfilledOrder<K>>,
 }
 impl<K> PriceQueue<K> {
     pub fn new() -> Self {
@@ -176,7 +176,7 @@ impl<K> PriceQueue<K> {
 }
 impl<K: OrderKey> PriceQueue<K> {
     pub fn push(&mut self, key: K, quantity: NonZeroUsize) -> QueueIndex {
-        self.orders.enqueue(OpenOrder::new(key, quantity))
+        self.orders.enqueue(UnfilledOrder::new(key, quantity))
     }
 
     pub fn cancel(&mut self, index: QueueIndex) {
@@ -215,11 +215,11 @@ enum OrderCompletion {
 }
 
 #[derive(Debug, Clone)]
-struct OpenOrder<K> {
+struct UnfilledOrder<K> {
     pub key: K,
     pub quantity: NonZeroUsize,
 }
-impl<K> OpenOrder<K> {
+impl<K> UnfilledOrder<K> {
     pub fn new(key: K, quantity: NonZeroUsize) -> Self {
         Self { key, quantity }
     }

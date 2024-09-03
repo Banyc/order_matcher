@@ -49,21 +49,21 @@ pub struct Filled<K> {
 #[derive(Debug, Clone)]
 pub struct AutoMatcher<K> {
     both_queues: BothDirectionData<BTreeMap<UnitPrice, PriceQueue<K>>>,
-    orders: HashMap<K, (UnitPrice, Direction, QueueIndex)>,
+    order_index: HashMap<K, (Direction, UnitPrice, QueueIndex)>,
     reused_queues: Vec<PriceQueue<K>>,
 }
 impl<K> AutoMatcher<K> {
     pub fn new() -> Self {
         Self {
             both_queues: BothDirectionData::new(),
-            orders: HashMap::new(),
+            order_index: HashMap::new(),
             reused_queues: vec![],
         }
     }
 }
 impl<K: OrderKey> AutoMatcher<K> {
     pub fn cancel_order(&mut self, key: &K) {
-        let Some((price, direction, index)) = self.orders.remove(key) else {
+        let Some((direction, price, index)) = self.order_index.remove(key) else {
             return;
         };
         let queues = self.both_queues.get_mut(direction);
@@ -79,7 +79,7 @@ impl<K: OrderKey> AutoMatcher<K> {
         order: LimitOrder<K>,
         on_each_filled: &mut impl FnMut(Filled<K>),
     ) {
-        assert!(!self.orders.contains_key(&order.key));
+        assert!(!self.order_index.contains_key(&order.key));
         let mut remaining_quantity = order.quantity;
         loop {
             let opp_queues = self.both_queues.get_mut(order.direction.flip());
@@ -98,7 +98,7 @@ impl<K: OrderKey> AutoMatcher<K> {
             while let Some((filled, completion)) = queue.match_(remaining_quantity) {
                 match completion {
                     OrderCompletion::Completed => {
-                        self.orders.remove(&filled.key);
+                        self.order_index.remove(&filled.key);
                     }
                     OrderCompletion::Open => (),
                 }
@@ -132,8 +132,8 @@ impl<K: OrderKey> AutoMatcher<K> {
         });
         let key = order.key.clone();
         let index = queue.push(order.key, order.quantity);
-        self.orders
-            .insert(key, (order.price, order.direction, index));
+        self.order_index
+            .insert(key, (order.direction, order.price, index));
     }
 }
 impl<K> Default for AutoMatcher<K> {

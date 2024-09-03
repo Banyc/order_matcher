@@ -12,4 +12,4 @@ dependencies = [
 [[package]]
 name = "primitive"
 version = "0.1.0"
-source = "git+https://github.com/Banyc/primitive.git?tag=v0.0.2#6311a5c2d702e3f2a6279111ab6b9d8f88114e1c"
+source = "git+https://github.com/Banyc/primitive.git?tag=v0.0.2#68417629c19dbef9e13955899d377edc699e7820"

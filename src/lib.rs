@@ -3,7 +3,10 @@ use std::{
     num::NonZeroUsize,
 };
 
-use primitive::indexed_queue::{IndexedQueue, QueueIndex};
+use primitive::{
+    indexed_queue::{IndexedQueue, QueueIndex},
+    LenExt,
+};
 
 pub trait OrderKey: Clone + Eq + core::hash::Hash {}
 

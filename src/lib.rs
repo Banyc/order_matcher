@@ -13,7 +13,7 @@ pub trait OrderKey: Clone + Eq + core::hash::Hash {}
 #[derive(Debug, Clone)]
 pub struct LimitOrder<K> {
     pub key: K,
-    pub direction: Direction,
+    pub side: Side,
     pub price: UnitPrice,
     pub quantity: NonZeroUsize,
 }
@@ -30,11 +30,11 @@ impl UnitPrice {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Direction {
+pub enum Side {
     Buy,
     Sell,
 }
-impl Direction {
+impl Side {
     pub fn flip(&self) -> Self {
         match self {
             Self::Buy => Self::Sell,
@@ -51,14 +51,14 @@ pub struct Filled<K> {
 
 #[derive(Debug, Clone)]
 pub struct AutoMatcher<K> {
-    both_queues: BothDirectionData<BTreeMap<UnitPrice, PriceQueue<K>>>,
-    order_index: HashMap<K, (Direction, UnitPrice, QueueIndex)>,
+    both_queues: BothSideData<BTreeMap<UnitPrice, PriceQueue<K>>>,
+    order_index: HashMap<K, (Side, UnitPrice, QueueIndex)>,
     reused_queues: Vec<PriceQueue<K>>,
 }
 impl<K> AutoMatcher<K> {
     pub fn new() -> Self {
         Self {
-            both_queues: BothDirectionData::new(),
+            both_queues: BothSideData::new(),
             order_index: HashMap::new(),
             reused_queues: vec![],
         }
@@ -66,10 +66,10 @@ impl<K> AutoMatcher<K> {
 }
 impl<K: OrderKey> AutoMatcher<K> {
     pub fn cancel_order(&mut self, key: &K) {
-        let Some((direction, price, index)) = self.order_index.remove(key) else {
+        let Some((side, price, index)) = self.order_index.remove(key) else {
             return;
         };
-        let queues = self.both_queues.get_mut(direction);
+        let queues = self.both_queues.get_mut(side);
         let queue = queues.get_mut(&price).unwrap();
         queue.cancel(index);
     }
@@ -85,12 +85,12 @@ impl<K: OrderKey> AutoMatcher<K> {
         assert!(!self.order_index.contains_key(&order.key));
         let mut remaining_quantity = order.quantity;
         loop {
-            let opp_queues = self.both_queues.get_mut(order.direction.flip());
-            let best_matchable_queue = match order.direction {
-                Direction::Buy => opp_queues
+            let opp_queues = self.both_queues.get_mut(order.side.flip());
+            let best_matchable_queue = match order.side {
+                Side::Buy => opp_queues
                     .first_entry()
                     .filter(|entry| *entry.key() <= order.price),
-                Direction::Sell => opp_queues
+                Side::Sell => opp_queues
                     .last_entry()
                     .filter(|entry| order.price <= *entry.key()),
             };
@@ -126,7 +126,7 @@ impl<K: OrderKey> AutoMatcher<K> {
     }
 
     fn insert_order(&mut self, order: LimitOrder<K>) {
-        let queues = self.both_queues.get_mut(order.direction);
+        let queues = self.both_queues.get_mut(order.side);
         let queue = queues.entry(order.price).or_insert_with(|| {
             if let Some(queue) = self.reused_queues.pop() {
                 return queue;
@@ -136,7 +136,7 @@ impl<K: OrderKey> AutoMatcher<K> {
         let key = order.key.clone();
         let index = queue.push(order.key, order.quantity);
         self.order_index
-            .insert(key, (order.direction, order.price, index));
+            .insert(key, (order.side, order.price, index));
     }
 }
 impl<K> Default for AutoMatcher<K> {
@@ -146,11 +146,11 @@ impl<K> Default for AutoMatcher<K> {
 }
 
 #[derive(Debug, Clone)]
-struct BothDirectionData<T> {
+struct BothSideData<T> {
     sell: T,
     buy: T,
 }
-impl<T: Default> BothDirectionData<T> {
+impl<T: Default> BothSideData<T> {
     pub fn new() -> Self {
         Self {
             sell: T::default(),
@@ -158,10 +158,10 @@ impl<T: Default> BothDirectionData<T> {
         }
     }
 
-    pub fn get_mut(&mut self, direction: Direction) -> &mut T {
-        match direction {
-            Direction::Buy => &mut self.buy,
-            Direction::Sell => &mut self.sell,
+    pub fn get_mut(&mut self, side: Side) -> &mut T {
+        match side {
+            Side::Buy => &mut self.buy,
+            Side::Sell => &mut self.sell,
         }
     }
 }
@@ -252,7 +252,7 @@ mod tests {
             matcher.place_order(
                 LimitOrder {
                     key: MyOrderKey(0),
-                    direction: Direction::Buy,
+                    side: Side::Buy,
                     price: UnitPrice::new(NonZeroUsize::new(2).unwrap()),
                     quantity: NonZeroUsize::new(2).unwrap(),
                 },
@@ -267,7 +267,7 @@ mod tests {
             matcher.place_order(
                 LimitOrder {
                     key: MyOrderKey(1),
-                    direction: Direction::Buy,
+                    side: Side::Buy,
                     price: UnitPrice::new(NonZeroUsize::new(2).unwrap()),
                     quantity: NonZeroUsize::new(2).unwrap(),
                 },
@@ -282,7 +282,7 @@ mod tests {
             matcher.place_order(
                 LimitOrder {
                     key: MyOrderKey(2),
-                    direction: Direction::Buy,
+                    side: Side::Buy,
                     price: UnitPrice::new(NonZeroUsize::new(2).unwrap()),
                     quantity: NonZeroUsize::new(2).unwrap(),
                 },
@@ -298,7 +298,7 @@ mod tests {
             matcher.place_order(
                 LimitOrder {
                     key: MyOrderKey(3),
-                    direction: Direction::Buy,
+                    side: Side::Buy,
                     price: UnitPrice::new(NonZeroUsize::new(1).unwrap()),
                     quantity: NonZeroUsize::new(2).unwrap(),
                 },
@@ -313,7 +313,7 @@ mod tests {
             matcher.place_order(
                 LimitOrder {
                     key: MyOrderKey(4),
-                    direction: Direction::Sell,
+                    side: Side::Sell,
                     price: UnitPrice::new(NonZeroUsize::new(1).unwrap()),
                     quantity: NonZeroUsize::new(3).unwrap(),
                 },
@@ -341,7 +341,7 @@ mod tests {
             matcher.place_order(
                 LimitOrder {
                     key: MyOrderKey(5),
-                    direction: Direction::Sell,
+                    side: Side::Sell,
                     price: UnitPrice::new(NonZeroUsize::new(1).unwrap()),
                     quantity: NonZeroUsize::new(3).unwrap(),
                 },

@@ -9,6 +9,15 @@ use primitive::{
 };
 
 pub trait OrderKey: Clone + Eq + core::hash::Hash {}
+impl OrderKey for u8 {}
+impl OrderKey for u16 {}
+impl OrderKey for u32 {}
+impl OrderKey for u64 {}
+impl OrderKey for u128 {}
+impl OrderKey for String {}
+impl OrderKey for &str {}
+impl OrderKey for &[u8] {}
+impl<const N: usize> OrderKey for [u8; N] {}
 
 #[derive(Debug, Clone)]
 pub struct LimitOrder<K> {

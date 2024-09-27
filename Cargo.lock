@@ -33,7 +33,7 @@ dependencies = [
 [[package]]
 name = "primitive"
 version = "0.1.0"
-source = "git+https://github.com/Banyc/primitive.git?tag=v0.0.9#c0a4586da118191f22620632d89809170958ad60"
+source = "git+https://github.com/Banyc/primitive.git?tag=v0.0.11#156cf1996926c3e45f85444ac428e5718b460ab1"
 dependencies = [
  "anyhow",
  "num-traits",

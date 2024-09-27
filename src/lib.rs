@@ -4,7 +4,7 @@ use std::{
 };
 
 use primitive::{
-    indexed_queue::{IndexedQueue, QueueIndex},
+    queue::indexed_queue::{IndexedQueue, QueueIndex},
     LenExt,
 };
 
@@ -47,6 +47,12 @@ impl Side {
 pub struct Filled<K> {
     pub key: K,
     pub quantity: NonZeroUsize,
+    pub completion: Completion,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Completion {
+    Full,
+    Partial,
 }
 
 #[derive(Debug, Clone)]
@@ -98,12 +104,12 @@ impl<K: OrderKey> AutoMatcher<K> {
                 break;
             };
             let queue = best_matchable_queue.get_mut();
-            while let Some((filled, completion)) = queue.match_(remaining_quantity) {
-                match completion {
-                    OrderCompletion::Completed => {
+            while let Some(filled) = queue.match_(remaining_quantity) {
+                match filled.completion {
+                    Completion::Full => {
                         self.order_index.remove(&filled.key);
                     }
-                    OrderCompletion::Open => (),
+                    Completion::Partial => (),
                 }
                 let remaining = remaining_quantity.get() - filled.quantity.get();
                 on_each_filled(filled);
@@ -190,31 +196,27 @@ impl<K: OrderKey> PriceQueue<K> {
         self.orders.is_empty()
     }
 
-    pub fn match_(&mut self, quantity: NonZeroUsize) -> Option<(Filled<K>, OrderCompletion)> {
+    pub fn match_(&mut self, quantity: NonZeroUsize) -> Option<Filled<K>> {
         let front = self.orders.front_mut()?;
         let (_, neural, front_quantity) = neutralize_quantity(quantity.get(), front.quantity.get());
-        let filled = Filled {
-            key: front.key.clone(),
-            quantity: NonZeroUsize::new(neural).unwrap(),
-        };
+        let key = front.key.clone();
         let completion = match NonZeroUsize::new(front_quantity) {
             Some(front_quantity) => {
                 front.quantity = front_quantity;
-                OrderCompletion::Open
+                Completion::Partial
             }
             None => {
                 self.orders.dequeue();
-                OrderCompletion::Completed
+                Completion::Full
             }
         };
-        Some((filled, completion))
+        let filled = Filled {
+            key,
+            quantity: NonZeroUsize::new(neural).unwrap(),
+            completion,
+        };
+        Some(filled)
     }
-}
-
-#[derive(Debug, Clone)]
-enum OrderCompletion {
-    Completed,
-    Open,
 }
 
 #[derive(Debug, Clone)]
@@ -324,11 +326,13 @@ mod tests {
                 [
                     Filled {
                         key: MyOrderKey(0),
-                        quantity: NonZeroUsize::new(2).unwrap()
+                        quantity: NonZeroUsize::new(2).unwrap(),
+                        completion: Completion::Full,
                     },
                     Filled {
                         key: MyOrderKey(1),
-                        quantity: NonZeroUsize::new(1).unwrap()
+                        quantity: NonZeroUsize::new(1).unwrap(),
+                        completion: Completion::Partial,
                     }
                 ]
             );
@@ -352,11 +356,13 @@ mod tests {
                 [
                     Filled {
                         key: MyOrderKey(1),
-                        quantity: NonZeroUsize::new(1).unwrap()
+                        quantity: NonZeroUsize::new(1).unwrap(),
+                        completion: Completion::Full,
                     },
                     Filled {
                         key: MyOrderKey(3),
-                        quantity: NonZeroUsize::new(2).unwrap()
+                        quantity: NonZeroUsize::new(2).unwrap(),
+                        completion: Completion::Full,
                     }
                 ]
             );

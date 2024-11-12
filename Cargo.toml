@@ -1,5 +1,5 @@
 [package]
-name = "auto_matching"
+name = "order_matcher"
 version = "0.1.0"
 edition = "2021"
 

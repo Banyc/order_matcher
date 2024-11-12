@@ -64,12 +64,12 @@ pub enum Completion {
 }
 
 #[derive(Debug, Clone)]
-pub struct AutoMatcher<K> {
+pub struct OrderMatcher<K> {
     price_queues: PriceQueues<K>,
     order_index: HashMap<K, (Side, UnitPrice, QueueIndex)>,
     reused_queues: Vec<PriceQueue<K>>,
 }
-impl<K> AutoMatcher<K> {
+impl<K> OrderMatcher<K> {
     pub fn new() -> Self {
         Self {
             price_queues: PriceQueues::new(),
@@ -78,7 +78,7 @@ impl<K> AutoMatcher<K> {
         }
     }
 }
-impl<K: OrderKey> AutoMatcher<K> {
+impl<K: OrderKey> OrderMatcher<K> {
     pub fn cancel_order(&mut self, key: &K) {
         let Some((side, price, index)) = self.order_index.remove(key) else {
             return;
@@ -148,7 +148,7 @@ impl<K: OrderKey> AutoMatcher<K> {
             .insert(key, (order.side, order.price, index));
     }
 }
-impl<K> Default for AutoMatcher<K> {
+impl<K> Default for OrderMatcher<K> {
     fn default() -> Self {
         Self::new()
     }
@@ -294,7 +294,7 @@ mod tests {
 
     #[test]
     fn test_place_cancel() {
-        let mut matcher = AutoMatcher::new();
+        let mut matcher = OrderMatcher::new();
         let mut filled_buf = vec![];
         {
             let mut on_each_filled = |filled| {

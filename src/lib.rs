@@ -1,9 +1,10 @@
-use std::{cmp::Reverse, collections::HashMap, num::NonZeroUsize};
+use core::{cmp::Reverse, num::NonZeroUsize};
+use std::collections::HashMap;
 
 use primitive::{
-    map::linear_front_btree::LinearFrontBTreeMap11,
+    map::{linear_front_btree::LinearFrontBTreeMap11, MapInsert},
+    ops::len::LenExt,
     queue::indexed_queue::{IndexedQueue, QueueIndex},
-    LenExt,
 };
 
 pub trait OrderKey: Clone + Eq + core::hash::Hash {}

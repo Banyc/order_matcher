@@ -1,5 +1,4 @@
 use core::{cmp::Reverse, num::NonZeroUsize};
-use std::collections::HashMap;
 
 use primitive::{
     map::{linear_front_btree::LinearFrontBTreeMap11, MapInsert},
@@ -7,20 +6,9 @@ use primitive::{
     queue::ind_queue::{IndQueue, QueueIndex},
 };
 
-pub trait OrderKey: Clone + Eq + core::hash::Hash {}
-impl OrderKey for u8 {}
-impl OrderKey for u16 {}
-impl OrderKey for u32 {}
-impl OrderKey for u64 {}
-impl OrderKey for u128 {}
-impl OrderKey for String {}
-impl OrderKey for &str {}
-impl OrderKey for &[u8] {}
-impl<const N: usize> OrderKey for [u8; N] {}
-
 #[derive(Debug, Clone)]
 pub struct LimitOrder<K> {
-    pub key: K,
+    pub name: K,
     pub side: Side,
     pub price: UnitPrice,
     pub quantity: NonZeroUsize,
@@ -53,7 +41,7 @@ impl Side {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Filled<K> {
-    pub key: K,
+    pub name: K,
     pub quantity: NonZeroUsize,
     pub is_order_completed: bool,
 }
@@ -61,21 +49,18 @@ pub struct Filled<K> {
 #[derive(Debug, Clone)]
 pub struct OrderMatcher<K> {
     price_queues: PriceQueues<K>,
-    order_index: HashMap<K, (Side, UnitPrice, QueueIndex)>,
     reused_queues: Vec<PriceQueue<K>>,
 }
 impl<K> OrderMatcher<K> {
     pub fn new() -> Self {
         Self {
             price_queues: PriceQueues::new(),
-            order_index: HashMap::new(),
             reused_queues: vec![],
         }
     }
 }
 impl<K> Clear for OrderMatcher<K> {
     fn clear(&mut self) {
-        self.order_index.clear();
         while let Some((_k, v)) = self.price_queues.ask_queues.pop_first() {
             self.reused_queues.push(v);
         }
@@ -84,34 +69,24 @@ impl<K> Clear for OrderMatcher<K> {
         }
     }
 }
-impl<K: OrderKey> OrderMatcher<K> {
-    pub fn cancel_order(&mut self, key: &K) {
-        let Some((side, price, index)) = self.order_index.remove(key) else {
-            return;
-        };
+impl<K: Clone> OrderMatcher<K> {
+    pub fn cancel_order(&mut self, side: Side, price: UnitPrice, index: QueueIndex) {
         let queue = self.price_queues.get_mut(side, price).unwrap();
         queue.cancel(index);
     }
 
-    /// # Panic
-    ///
-    /// Panic if two orders with the same key are placed.
     pub fn place_limit_order(
         &mut self,
         order: LimitOrder<K>,
         on_each_filled: impl FnMut(Filled<K>),
-    ) {
-        assert!(!self.order_index.contains_key(&order.key));
+    ) -> Option<QueueIndex> {
         let remaining_quantity =
-            self.fill_orders(order.side, order.price, order.quantity, on_each_filled);
-        let Some(remaining_quantity) = remaining_quantity else {
-            return;
-        };
+            self.fill_orders(order.side, order.price, order.quantity, on_each_filled)?;
         let order = LimitOrder {
             quantity: remaining_quantity,
             ..order
         };
-        self.insert_order(order);
+        Some(self.insert_order(order))
     }
 
     /// Return remaining quantity
@@ -145,12 +120,7 @@ impl<K: OrderKey> OrderMatcher<K> {
             let Some((price, queue)) = best_matchable else {
                 break;
             };
-            remaining_quantity = queue.fill_all(quantity, |filled| {
-                if filled.is_order_completed {
-                    self.order_index.remove(&filled.key);
-                }
-                on_each_filled(filled);
-            });
+            remaining_quantity = queue.fill_all(quantity, &mut on_each_filled);
             if queue.is_empty() {
                 self.reused_queues
                     .push(self.price_queues.remove(side.flip(), price).unwrap());
@@ -159,7 +129,7 @@ impl<K: OrderKey> OrderMatcher<K> {
         remaining_quantity
     }
 
-    fn insert_order(&mut self, order: LimitOrder<K>) {
+    fn insert_order(&mut self, order: LimitOrder<K>) -> QueueIndex {
         let queue = self
             .price_queues
             .ensure_get_mut(order.side, order.price, || {
@@ -168,10 +138,7 @@ impl<K: OrderKey> OrderMatcher<K> {
                 }
                 PriceQueue::new()
             });
-        let key = order.key.clone();
-        let index = queue.push(order.key, order.quantity);
-        self.order_index
-            .insert(key, (order.side, order.price, index));
+        queue.push(order.name, order.quantity)
     }
 }
 impl<K> Default for OrderMatcher<K> {
@@ -258,36 +225,31 @@ impl<K> PriceQueue<K> {
         }
     }
 }
-impl<K: OrderKey> PriceQueue<K> {
-    pub fn push(&mut self, key: K, quantity: NonZeroUsize) -> QueueIndex {
-        self.orders.enqueue(UnfilledOrder::new(key, quantity))
+impl<K: Clone> PriceQueue<K> {
+    pub fn push(&mut self, name: K, quantity: NonZeroUsize) -> QueueIndex {
+        self.orders.enqueue(UnfilledOrder::new(name, quantity))
     }
-
     pub fn cancel(&mut self, index: QueueIndex) {
         self.orders.remove(index);
     }
-
     pub fn is_empty(&self) -> bool {
         self.orders.is_empty()
     }
-
     pub fn fill_one(&mut self, quantity: NonZeroUsize) -> Option<(Filled<K>, usize)> {
         let front = self.orders.front_mut()?;
         let (remaining, neural, front_quantity) =
             neutralize_quantity(quantity.get(), front.quantity.get());
-        let key = front.key.clone();
+        let name = front.name.clone();
         let front_quantity = NonZeroUsize::new(front_quantity);
-        let is_order_completed = front_quantity.is_none();
-        match front_quantity {
-            Some(front_quantity) => {
-                front.quantity = front_quantity;
-            }
-            None => {
-                self.orders.dequeue();
-            }
+        if let Some(front_quantity) = front_quantity {
+            front.quantity = front_quantity;
         };
+        let is_order_completed = front_quantity.is_none();
+        if is_order_completed {
+            self.orders.dequeue().unwrap();
+        }
         let filled = Filled {
-            key,
+            name,
             quantity: NonZeroUsize::new(neural).unwrap(),
             is_order_completed,
         };
@@ -312,12 +274,12 @@ impl<K: OrderKey> PriceQueue<K> {
 
 #[derive(Debug, Clone)]
 struct UnfilledOrder<K> {
-    pub key: K,
+    pub name: K,
     pub quantity: NonZeroUsize,
 }
 impl<K> UnfilledOrder<K> {
-    pub fn new(key: K, quantity: NonZeroUsize) -> Self {
-        Self { key, quantity }
+    pub fn new(name: K, quantity: NonZeroUsize) -> Self {
+        Self { name, quantity }
     }
 }
 
@@ -332,96 +294,85 @@ mod tests {
 
     #[derive(Debug, Clone, PartialEq, Eq, Hash)]
     struct MyOrderKey(usize);
-    impl OrderKey for MyOrderKey {}
 
     #[test]
     fn test_place_cancel() {
         let mut matcher = OrderMatcher::new();
         let mut filled_buf = vec![];
+        fn push<T>(buf: &mut Vec<T>) -> impl FnMut(T) + '_ {
+            |item| {
+                buf.push(item);
+            }
+        }
         {
-            let mut on_each_filled = |filled| {
-                filled_buf.push(filled);
-            };
             matcher.place_limit_order(
                 LimitOrder {
-                    key: MyOrderKey(0),
+                    name: MyOrderKey(0),
                     side: Side::Buy,
                     price: UnitPrice::new(NonZeroUsize::new(2).unwrap()),
                     quantity: NonZeroUsize::new(2).unwrap(),
                 },
-                &mut on_each_filled,
+                push(&mut filled_buf),
             );
             assert!(filled_buf.is_empty());
         }
         {
-            let mut on_each_filled = |filled| {
-                filled_buf.push(filled);
-            };
             matcher.place_limit_order(
                 LimitOrder {
-                    key: MyOrderKey(1),
+                    name: MyOrderKey(1),
                     side: Side::Buy,
                     price: UnitPrice::new(NonZeroUsize::new(2).unwrap()),
                     quantity: NonZeroUsize::new(2).unwrap(),
                 },
-                &mut on_each_filled,
+                push(&mut filled_buf),
             );
             assert!(filled_buf.is_empty());
         }
         {
-            let mut on_each_filled = |filled| {
-                filled_buf.push(filled);
+            let order = LimitOrder {
+                name: MyOrderKey(2),
+                side: Side::Buy,
+                price: UnitPrice::new(NonZeroUsize::new(2).unwrap()),
+                quantity: NonZeroUsize::new(2).unwrap(),
             };
-            matcher.place_limit_order(
-                LimitOrder {
-                    key: MyOrderKey(2),
-                    side: Side::Buy,
-                    price: UnitPrice::new(NonZeroUsize::new(2).unwrap()),
-                    quantity: NonZeroUsize::new(2).unwrap(),
-                },
-                &mut on_each_filled,
-            );
+            let index = matcher
+                .place_limit_order(order.clone(), push(&mut filled_buf))
+                .unwrap();
             assert!(filled_buf.is_empty());
-            matcher.cancel_order(&MyOrderKey(2));
+            matcher.cancel_order(order.side, order.price, index);
         }
         {
-            let mut on_each_filled = |filled| {
-                filled_buf.push(filled);
-            };
             matcher.place_limit_order(
                 LimitOrder {
-                    key: MyOrderKey(3),
+                    name: MyOrderKey(3),
                     side: Side::Buy,
                     price: UnitPrice::new(NonZeroUsize::new(1).unwrap()),
                     quantity: NonZeroUsize::new(2).unwrap(),
                 },
-                &mut on_each_filled,
+                push(&mut filled_buf),
             );
             assert!(filled_buf.is_empty());
         }
         {
-            let mut on_each_filled = |filled| {
-                filled_buf.push(filled);
-            };
             matcher.place_limit_order(
                 LimitOrder {
-                    key: MyOrderKey(4),
+                    name: MyOrderKey(4),
                     side: Side::Sell,
                     price: UnitPrice::new(NonZeroUsize::new(1).unwrap()),
                     quantity: NonZeroUsize::new(3).unwrap(),
                 },
-                &mut on_each_filled,
+                push(&mut filled_buf),
             );
             assert_eq!(
                 filled_buf,
                 [
                     Filled {
-                        key: MyOrderKey(0),
+                        name: MyOrderKey(0),
                         quantity: NonZeroUsize::new(2).unwrap(),
                         is_order_completed: true,
                     },
                     Filled {
-                        key: MyOrderKey(1),
+                        name: MyOrderKey(1),
                         quantity: NonZeroUsize::new(1).unwrap(),
                         is_order_completed: false,
                     }
@@ -430,28 +381,25 @@ mod tests {
             filled_buf.clear();
         }
         {
-            let mut on_each_filled = |filled| {
-                filled_buf.push(filled);
-            };
             matcher.place_limit_order(
                 LimitOrder {
-                    key: MyOrderKey(5),
+                    name: MyOrderKey(5),
                     side: Side::Sell,
                     price: UnitPrice::new(NonZeroUsize::new(1).unwrap()),
                     quantity: NonZeroUsize::new(3).unwrap(),
                 },
-                &mut on_each_filled,
+                push(&mut filled_buf),
             );
             assert_eq!(
                 filled_buf,
                 [
                     Filled {
-                        key: MyOrderKey(1),
+                        name: MyOrderKey(1),
                         quantity: NonZeroUsize::new(1).unwrap(),
                         is_order_completed: true,
                     },
                     Filled {
-                        key: MyOrderKey(3),
+                        name: MyOrderKey(3),
                         quantity: NonZeroUsize::new(2).unwrap(),
                         is_order_completed: true,
                     }

@@ -140,6 +140,32 @@ impl<K: Clone> OrderMatcher<K> {
             });
         queue.push(order.name, order.quantity)
     }
+
+    #[allow(dead_code)]
+    pub(crate) fn check_rep(&self) {
+        check_spread(&self.price_queues);
+        check_empty_queue(&self.price_queues);
+        fn check_spread<K>(price_queues: &PriceQueues<K>) {
+            let Some(best_ask) = price_queues.ask_queues.iter().next() else {
+                return;
+            };
+            let Some(best_bid) = price_queues.bid_queues.iter().next() else {
+                return;
+            };
+            assert!(best_bid.0 .0 < *best_ask.0);
+        }
+        fn check_empty_queue<K: Clone>(price_queues: &PriceQueues<K>) {
+            for (_, queue) in price_queues.ask_queues.iter() {
+                check_queue(queue);
+            }
+            for (_, queue) in price_queues.bid_queues.iter() {
+                check_queue(queue);
+            }
+            fn check_queue<K: Clone>(queue: &PriceQueue<K>) {
+                assert!(!queue.is_empty());
+            }
+        }
+    }
 }
 impl<K> Default for OrderMatcher<K> {
     fn default() -> Self {
@@ -290,13 +316,20 @@ fn neutralize_quantity(a: usize, b: usize) -> (usize, usize, usize) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use std::collections::HashMap;
 
-    #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-    struct MyOrderKey(usize);
+    use super::*;
 
     #[test]
     fn test_place_cancel() {
+        let instructions = [
+            (0, Side::Buy, 2, 2, &[][..], &[][..]),
+            (1, Side::Buy, 2, 2, &[], &[]),
+            (2, Side::Buy, 2, 2, &[], &[2]),
+            (3, Side::Buy, 1, 2, &[], &[]),
+            (4, Side::Sell, 1, 3, &[(0, 2, true), (1, 1, false)], &[]),
+            (5, Side::Sell, 1, 3, &[(1, 1, true), (3, 2, true)], &[]),
+        ];
         let mut matcher = OrderMatcher::new();
         let mut filled_buf = vec![];
         fn push<T>(buf: &mut Vec<T>) -> impl FnMut(T) + '_ {
@@ -304,108 +337,33 @@ mod tests {
                 buf.push(item);
             }
         }
-        {
-            matcher.place_limit_order(
-                LimitOrder {
-                    name: MyOrderKey(0),
-                    side: Side::Buy,
-                    price: UnitPrice::new(NonZeroUsize::new(2).unwrap()),
-                    quantity: NonZeroUsize::new(2).unwrap(),
-                },
-                push(&mut filled_buf),
-            );
-            assert!(filled_buf.is_empty());
-        }
-        {
-            matcher.place_limit_order(
-                LimitOrder {
-                    name: MyOrderKey(1),
-                    side: Side::Buy,
-                    price: UnitPrice::new(NonZeroUsize::new(2).unwrap()),
-                    quantity: NonZeroUsize::new(2).unwrap(),
-                },
-                push(&mut filled_buf),
-            );
-            assert!(filled_buf.is_empty());
-        }
-        {
+        let mut orders = HashMap::new();
+        for instruction in instructions {
+            let name = instruction.0;
+            let side = instruction.1;
+            let price = UnitPrice::new(NonZeroUsize::new(instruction.2).unwrap());
             let order = LimitOrder {
-                name: MyOrderKey(2),
-                side: Side::Buy,
-                price: UnitPrice::new(NonZeroUsize::new(2).unwrap()),
-                quantity: NonZeroUsize::new(2).unwrap(),
+                name,
+                side,
+                price,
+                quantity: NonZeroUsize::new(instruction.3).unwrap(),
             };
-            let index = matcher
-                .place_limit_order(order.clone(), push(&mut filled_buf))
-                .unwrap();
-            assert!(filled_buf.is_empty());
-            matcher.cancel_order(order.side, order.price, index);
-        }
-        {
-            matcher.place_limit_order(
-                LimitOrder {
-                    name: MyOrderKey(3),
-                    side: Side::Buy,
-                    price: UnitPrice::new(NonZeroUsize::new(1).unwrap()),
-                    quantity: NonZeroUsize::new(2).unwrap(),
-                },
-                push(&mut filled_buf),
-            );
-            assert!(filled_buf.is_empty());
-        }
-        {
-            matcher.place_limit_order(
-                LimitOrder {
-                    name: MyOrderKey(4),
-                    side: Side::Sell,
-                    price: UnitPrice::new(NonZeroUsize::new(1).unwrap()),
-                    quantity: NonZeroUsize::new(3).unwrap(),
-                },
-                push(&mut filled_buf),
-            );
-            assert_eq!(
-                filled_buf,
-                [
-                    Filled {
-                        name: MyOrderKey(0),
-                        quantity: NonZeroUsize::new(2).unwrap(),
-                        is_order_completed: true,
-                    },
-                    Filled {
-                        name: MyOrderKey(1),
-                        quantity: NonZeroUsize::new(1).unwrap(),
-                        is_order_completed: false,
-                    }
-                ]
-            );
+            let index = matcher.place_limit_order(order, push(&mut filled_buf));
+            if let Some(index) = index {
+                orders.insert(name, (side, price, index));
+            }
+            assert_eq!(filled_buf.len(), instruction.4.len());
+            for (a, b) in filled_buf.iter().zip(instruction.4) {
+                assert_eq!(a.name, b.0);
+                assert_eq!(a.quantity.get(), b.1);
+                assert_eq!(a.is_order_completed, b.2);
+            }
+            for name in instruction.5 {
+                let (side, price, index) = orders.remove(name).unwrap();
+                matcher.cancel_order(side, price, index);
+            }
             filled_buf.clear();
-        }
-        {
-            matcher.place_limit_order(
-                LimitOrder {
-                    name: MyOrderKey(5),
-                    side: Side::Sell,
-                    price: UnitPrice::new(NonZeroUsize::new(1).unwrap()),
-                    quantity: NonZeroUsize::new(3).unwrap(),
-                },
-                push(&mut filled_buf),
-            );
-            assert_eq!(
-                filled_buf,
-                [
-                    Filled {
-                        name: MyOrderKey(1),
-                        quantity: NonZeroUsize::new(1).unwrap(),
-                        is_order_completed: true,
-                    },
-                    Filled {
-                        name: MyOrderKey(3),
-                        quantity: NonZeroUsize::new(2).unwrap(),
-                        is_order_completed: true,
-                    }
-                ]
-            );
-            filled_buf.clear();
+            matcher.check_rep();
         }
     }
 }

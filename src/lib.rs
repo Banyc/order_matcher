@@ -73,6 +73,10 @@ impl<K: Clone> OrderMatcher<K> {
     pub fn cancel_order(&mut self, side: Side, price: UnitPrice, index: QueueIndex) {
         let queue = self.price_queues.get_mut(side, price).unwrap();
         queue.cancel(index);
+        if queue.is_empty() {
+            self.reused_queues
+                .push(self.price_queues.remove(side, price).unwrap());
+        }
     }
 
     pub fn place_limit_order(
@@ -100,7 +104,7 @@ impl<K: Clone> OrderMatcher<K> {
             Side::Buy => NonZeroUsize::new(usize::MAX).unwrap(),
             Side::Sell => NonZeroUsize::new(1).unwrap(),
         };
-        let price = UnitPrice(price);
+        let price = UnitPrice::new(price);
         self.fill_orders(side, price, quantity, on_each_filled)
     }
 
@@ -318,6 +322,8 @@ fn neutralize_quantity(a: usize, b: usize) -> (usize, usize, usize) {
 mod tests {
     use std::collections::HashMap;
 
+    use rand::{distributions::Standard, prelude::Distribution, thread_rng, Rng};
+
     use super::*;
 
     #[test]
@@ -332,11 +338,6 @@ mod tests {
         ];
         let mut matcher = OrderMatcher::new();
         let mut filled_buf = vec![];
-        fn push<T>(buf: &mut Vec<T>) -> impl FnMut(T) + '_ {
-            |item| {
-                buf.push(item);
-            }
-        }
         let mut orders = HashMap::new();
         for instruction in instructions {
             let name = instruction.0;
@@ -364,6 +365,131 @@ mod tests {
             }
             filled_buf.clear();
             matcher.check_rep();
+        }
+    }
+
+    #[test]
+    fn test_simulated() {
+        let rounds = if cfg!(debug_assertions) {
+            1 << 10
+        } else {
+            1 << 16
+        };
+        std::thread::scope(|s| {
+            for _ in 0..4 {
+                s.spawn(move || {
+                    let mut rng = thread_rng();
+                    for _ in 0..(1 << 8) {
+                        simulate(&mut rng, rounds);
+                    }
+                });
+            }
+        });
+    }
+    fn simulate(rng: &mut impl Rng, rounds: usize) {
+        let mut matcher = OrderMatcher::new();
+        let mut filled_buf = vec![];
+        let mut orders = HashMap::new();
+        let price_range = || 1..20;
+        let quantity_range = || 1..100;
+        for i in 0..rounds {
+            filled_buf.clear();
+            let action: SimulateAction = rng.gen();
+            match action {
+                SimulateAction::Limit => {
+                    let price = rng.gen_range(price_range());
+                    let price = UnitPrice::new(NonZeroUsize::new(price).unwrap());
+                    let side: Side = rng.gen();
+                    let is_filled = match side {
+                        Side::Buy => {
+                            let best_ask = matcher
+                                .price_queues
+                                .ask_queues
+                                .iter()
+                                .next()
+                                .map(|(p, _)| *p);
+                            best_ask.map(|p| p <= price).unwrap_or(false)
+                        }
+                        Side::Sell => {
+                            let best_bid = matcher
+                                .price_queues
+                                .bid_queues
+                                .iter()
+                                .next()
+                                .map(|(p, _)| p.0);
+                            best_bid.map(|p| price <= p).unwrap_or(false)
+                        }
+                    };
+                    let quantity = rng.gen_range(quantity_range());
+                    let quantity = NonZeroUsize::new(quantity).unwrap();
+                    let order = LimitOrder {
+                        name: i,
+                        side,
+                        price,
+                        quantity,
+                    };
+                    let index = matcher.place_limit_order(order, push(&mut filled_buf));
+                    if let Some(index) = index {
+                        orders.insert(i, (side, price, index));
+                    }
+                    assert_eq!(!filled_buf.is_empty(), is_filled);
+                }
+                SimulateAction::Market => {
+                    let side: Side = rng.gen();
+                    let quantity = rng.gen_range(quantity_range());
+                    let quantity = NonZeroUsize::new(quantity).unwrap();
+                    let remaining =
+                        matcher.place_market_order(side, quantity, push(&mut filled_buf));
+                    if remaining == Some(quantity) {
+                        assert!(filled_buf.is_empty());
+                    } else {
+                        assert!(!filled_buf.is_empty());
+                    }
+                }
+                SimulateAction::Cancel => {
+                    let Some(&name) = orders.keys().next() else {
+                        continue;
+                    };
+                    let (side, price, index) = orders.remove(&name).unwrap();
+                    matcher.cancel_order(side, price, index);
+                }
+            }
+            for filled in &filled_buf {
+                if filled.is_order_completed {
+                    orders.remove(&filled.name).unwrap();
+                }
+            }
+            matcher.check_rep();
+        }
+    }
+
+    impl Distribution<Side> for Standard {
+        fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> Side {
+            match rng.gen_range(0..2) {
+                0 => Side::Buy,
+                _ => Side::Sell,
+            }
+        }
+    }
+
+    enum SimulateAction {
+        Limit,
+        Market,
+        Cancel,
+    }
+    impl Distribution<SimulateAction> for Standard {
+        fn sample<R: Rng + ?Sized>(&self, rng: &mut R) -> SimulateAction {
+            match rng.gen_range(0..3) {
+                0 => SimulateAction::Limit,
+                1 => SimulateAction::Market,
+                _ => SimulateAction::Cancel,
+            }
+        }
+    }
+
+    fn push<T>(buf: &mut Vec<T>) -> impl FnMut(T) + '_ {
+        |item| {
+            buf.push(item);
         }
     }
 }

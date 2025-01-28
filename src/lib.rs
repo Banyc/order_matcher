@@ -7,11 +7,11 @@ use primitive::{
 };
 
 #[derive(Debug, Clone)]
-pub struct LimitOrder<K> {
+pub struct Order<K> {
     pub name: K,
     pub side: Side,
-    pub price: UnitPrice,
-    pub quantity: NonZeroUsize,
+    pub limit_price: UnitPrice,
+    pub size: NonZeroUsize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -79,36 +79,35 @@ impl<K: Clone> OrderMatcher<K> {
         }
     }
 
-    pub fn place_limit_order(
+    pub fn place_order(
         &mut self,
-        order: LimitOrder<K>,
+        order: Order<K>,
         on_each_filled: impl FnMut(Filled<K>),
     ) -> Option<QueueIndex> {
-        let remaining_quantity =
-            self.fill_orders(order.side, order.price, order.quantity, on_each_filled)?;
-        let order = LimitOrder {
-            quantity: remaining_quantity,
+        let new_size =
+            self.fill_orders(order.side, order.limit_price, order.size, on_each_filled)?;
+        let order = Order {
+            size: new_size,
             ..order
         };
         Some(self.insert_order(order))
     }
 
-    /// Return remaining quantity
+    /// Return remaining size
     pub fn place_market_order(
         &mut self,
         side: Side,
-        quantity: NonZeroUsize,
+        size: NonZeroUsize,
         on_each_filled: impl FnMut(Filled<K>),
     ) -> Option<NonZeroUsize> {
-        let price = match side {
+        let price = UnitPrice::new(match side {
             Side::Buy => NonZeroUsize::new(usize::MAX).unwrap(),
             Side::Sell => NonZeroUsize::new(1).unwrap(),
-        };
-        let price = UnitPrice::new(price);
-        self.fill_orders(side, price, quantity, on_each_filled)
+        });
+        self.fill_orders(side, price, size, on_each_filled)
     }
 
-    /// Return remaining quantity
+    /// Return remaining size
     fn fill_orders(
         &mut self,
         side: Side,
@@ -118,10 +117,10 @@ impl<K: Clone> OrderMatcher<K> {
     ) -> Option<NonZeroUsize> {
         let mut remaining_quantity = Some(quantity);
         while let Some(quantity) = remaining_quantity {
-            let best_matchable = self
+            let Some((price, queue)) = self
                 .price_queues
-                .best_matchable_queue_mut(side, limit_price);
-            let Some((price, queue)) = best_matchable else {
+                .eligible_highest_priority_queue_mut(side, limit_price)
+            else {
                 break;
             };
             remaining_quantity = queue.fill_all(quantity, &mut on_each_filled);
@@ -133,16 +132,16 @@ impl<K: Clone> OrderMatcher<K> {
         remaining_quantity
     }
 
-    fn insert_order(&mut self, order: LimitOrder<K>) -> QueueIndex {
+    fn insert_order(&mut self, order: Order<K>) -> QueueIndex {
         let queue = self
             .price_queues
-            .ensure_get_mut(order.side, order.price, || {
+            .ensure_get_mut(order.side, order.limit_price, || {
                 if let Some(queue) = self.reused_queues.pop() {
                     return queue;
                 }
                 PriceQueue::new()
             });
-        queue.push(order.name, order.quantity)
+        queue.push(order.name, order.size)
     }
 
     #[allow(dead_code)]
@@ -216,24 +215,24 @@ impl<K> PriceQueues<K> {
             }
         }
     }
-    pub fn best_matchable_queue_mut(
+    pub fn eligible_highest_priority_queue_mut(
         &mut self,
-        side: Side,
+        incoming_side: Side,
         limit_price: UnitPrice,
     ) -> Option<(UnitPrice, &mut PriceQueue<K>)> {
-        match side {
+        match incoming_side {
             Side::Buy => self
                 .ask_queues
                 .iter_mut()
                 .nth(0)
-                .filter(|(ask_price, _)| **ask_price <= limit_price)
-                .map(|(price, queue)| (*price, queue)),
+                .filter(|(&ask_price, _)| ask_price <= limit_price)
+                .map(|(&price, queue)| (price, queue)),
             Side::Sell => self
                 .bid_queues
                 .iter_mut()
                 .nth(0)
-                .filter(|(Reverse(bid_price), _)| limit_price <= *bid_price)
-                .map(|(Reverse(price), queue)| (*price, queue)),
+                .filter(|(&Reverse(bid_price), _)| limit_price <= bid_price)
+                .map(|(&Reverse(price), queue)| (price, queue)),
         }
     }
     pub fn remove(&mut self, side: Side, price: UnitPrice) -> Option<PriceQueue<K>> {
@@ -246,7 +245,7 @@ impl<K> PriceQueues<K> {
 
 #[derive(Debug, Clone)]
 struct PriceQueue<K> {
-    orders: IndQueue<UnfilledOrder<K>>,
+    orders: IndQueue<ActiveOrder<K>>,
 }
 impl<K> PriceQueue<K> {
     pub fn new() -> Self {
@@ -256,8 +255,8 @@ impl<K> PriceQueue<K> {
     }
 }
 impl<K: Clone> PriceQueue<K> {
-    pub fn push(&mut self, name: K, quantity: NonZeroUsize) -> QueueIndex {
-        self.orders.enqueue(UnfilledOrder::new(name, quantity))
+    pub fn push(&mut self, name: K, size: NonZeroUsize) -> QueueIndex {
+        self.orders.enqueue(ActiveOrder::new(name, size))
     }
     pub fn cancel(&mut self, index: QueueIndex) {
         self.orders.remove(index);
@@ -265,22 +264,22 @@ impl<K: Clone> PriceQueue<K> {
     pub fn is_empty(&self) -> bool {
         self.orders.is_empty()
     }
-    pub fn fill_one(&mut self, quantity: NonZeroUsize) -> Option<(Filled<K>, usize)> {
+    pub fn fill_one(&mut self, size: NonZeroUsize) -> Option<(Filled<K>, usize)> {
         let front = self.orders.front_mut()?;
-        let (remaining, neural, front_quantity) =
-            neutralize_quantity(quantity.get(), front.quantity.get());
+        let (remaining, matched_quantity, new_front_quantity) =
+            match_sizes(size.get(), front.quantity.get());
         let name = front.name.clone();
-        let front_quantity = NonZeroUsize::new(front_quantity);
-        if let Some(front_quantity) = front_quantity {
-            front.quantity = front_quantity;
+        let new_front_quantity = NonZeroUsize::new(new_front_quantity);
+        if let Some(quantity) = new_front_quantity {
+            front.quantity = quantity;
         };
-        let is_order_completed = front_quantity.is_none();
+        let is_order_completed = new_front_quantity.is_none();
         if is_order_completed {
             self.orders.dequeue().unwrap();
         }
         let filled = Filled {
             name,
-            quantity: NonZeroUsize::new(neural).unwrap(),
+            quantity: NonZeroUsize::new(matched_quantity).unwrap(),
             is_order_completed,
         };
         Some((filled, remaining))
@@ -292,10 +291,9 @@ impl<K: Clone> PriceQueue<K> {
         mut on_each_filled: impl FnMut(Filled<K>),
     ) -> Option<NonZeroUsize> {
         let mut remaining_quantity = quantity;
-        while let Some((filled, remaining)) = self.fill_one(remaining_quantity) {
+        while let Some((filled, new_quantity)) = self.fill_one(remaining_quantity) {
             on_each_filled(filled);
-            let remaining = NonZeroUsize::new(remaining)?;
-            remaining_quantity = remaining;
+            remaining_quantity = NonZeroUsize::new(new_quantity)?;
         }
         assert!(self.is_empty());
         Some(remaining_quantity)
@@ -303,17 +301,20 @@ impl<K: Clone> PriceQueue<K> {
 }
 
 #[derive(Debug, Clone)]
-struct UnfilledOrder<K> {
+struct ActiveOrder<K> {
     pub name: K,
     pub quantity: NonZeroUsize,
 }
-impl<K> UnfilledOrder<K> {
-    pub fn new(name: K, quantity: NonZeroUsize) -> Self {
-        Self { name, quantity }
+impl<K> ActiveOrder<K> {
+    pub fn new(name: K, size: NonZeroUsize) -> Self {
+        Self {
+            name,
+            quantity: size,
+        }
     }
 }
 
-fn neutralize_quantity(a: usize, b: usize) -> (usize, usize, usize) {
+fn match_sizes(a: usize, b: usize) -> (usize, usize, usize) {
     let min = a.min(b);
     (a - min, min, b - min)
 }
@@ -343,13 +344,13 @@ mod tests {
             let name = instruction.0;
             let side = instruction.1;
             let price = UnitPrice::new(NonZeroUsize::new(instruction.2).unwrap());
-            let order = LimitOrder {
+            let order = Order {
                 name,
                 side,
-                price,
-                quantity: NonZeroUsize::new(instruction.3).unwrap(),
+                limit_price: price,
+                size: NonZeroUsize::new(instruction.3).unwrap(),
             };
-            let index = matcher.place_limit_order(order, push(&mut filled_buf));
+            let index = matcher.place_order(order, push(&mut filled_buf));
             if let Some(index) = index {
                 orders.insert(name, (side, price, index));
             }
@@ -420,15 +421,15 @@ mod tests {
                             best_bid.map(|p| price <= p).unwrap_or(false)
                         }
                     };
-                    let quantity = rng.gen_range(quantity_range());
-                    let quantity = NonZeroUsize::new(quantity).unwrap();
-                    let order = LimitOrder {
+                    let size = rng.gen_range(quantity_range());
+                    let size = NonZeroUsize::new(size).unwrap();
+                    let order = Order {
                         name: i,
                         side,
-                        price,
-                        quantity,
+                        limit_price: price,
+                        size,
                     };
-                    let index = matcher.place_limit_order(order, push(&mut filled_buf));
+                    let index = matcher.place_order(order, push(&mut filled_buf));
                     if let Some(index) = index {
                         orders.insert(i, (side, price, index));
                     }
@@ -436,11 +437,10 @@ mod tests {
                 }
                 SimulateAction::Market => {
                     let side: Side = rng.gen();
-                    let quantity = rng.gen_range(quantity_range());
-                    let quantity = NonZeroUsize::new(quantity).unwrap();
-                    let remaining =
-                        matcher.place_market_order(side, quantity, push(&mut filled_buf));
-                    if remaining == Some(quantity) {
+                    let size = rng.gen_range(quantity_range());
+                    let size = NonZeroUsize::new(size).unwrap();
+                    let remaining = matcher.place_market_order(side, size, push(&mut filled_buf));
+                    if remaining == Some(size) {
                         assert!(filled_buf.is_empty());
                     } else {
                         assert!(!filled_buf.is_empty());
